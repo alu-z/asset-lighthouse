@@ -1,0 +1,4 @@
+interface:
+  display_name: "Asset Lighthouse"
+  short_description: "Guide local, read-only crypto-theft triage across endpoints, browsers, wallets, and development environments"
+  default_prompt: "Use $asset-lighthouse to guide a concise, read-only local investigation of suspected crypto theft and provide evidence-based remediation advice."
