@@ -92,6 +92,7 @@ The live test overwrites the current clipboard and does not restore it. Clipboar
 asset-lighthouse/
 ├── SKILL.md
 ├── README.md
+├── LICENSE
 ├── agents/openai.yaml
 ├── references/
 │   ├── agent-execution-examples.md
@@ -111,4 +112,4 @@ No background service or third-party Python package is required by the skill its
 
 Version 1 is a test-candidate release. Syntax checks, cross-platform dry-runs, Windows read-only collection, network-summary collection, output protection, and package-integrity checks have passed. Real macOS live testing and host-specific integration testing remain environment-dependent.
 
-Asset Lighthouse is an investigation aid, not a replacement for EDR, antivirus, incident response, or professional digital forensics. Add an explicit open-source license before public redistribution if required by your project.
+Asset Lighthouse is an investigation aid, not a replacement for EDR, antivirus, incident response, or professional digital forensics. This skill is released under the [MIT License](LICENSE).
