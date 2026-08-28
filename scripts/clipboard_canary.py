@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a synthetic clipboard replacement test on macOS or Windows.
+"""Run a clipboard replacement test with a synthetic or public address value.
 
 This intentionally writes a synthetic value to the clipboard. It must only be
 run after the user asks for a clipboard test. It never uses a real wallet
@@ -12,6 +12,7 @@ import argparse
 import ctypes
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -22,6 +23,8 @@ from typing import Any
 
 SCHEMA = "asset-lighthouse-clipboard-test/v1"
 DEFAULT_VALUE = "0x1111111111111111111111111111111111111111"
+MAX_TEST_VALUE_LENGTH = 256
+PRIVATE_KEY_LIKE = re.compile(r"^(?:0x)?[0-9a-fA-F]{64}$")
 
 
 def configure_stdio() -> None:
@@ -61,6 +64,20 @@ def detect_platform() -> str:
     if sys.platform == "darwin":
         return "macos"
     return "unsupported"
+
+
+def validate_test_value(value: str) -> str:
+    """Accept a public address-like value, never a seed/private-key-like value."""
+    value = value.strip()
+    if not value:
+        raise ValueError("test value must not be empty")
+    if len(value) > MAX_TEST_VALUE_LENGTH:
+        raise ValueError(f"test value must be at most {MAX_TEST_VALUE_LENGTH} characters")
+    if any(char.isspace() or ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise ValueError("test value must not contain whitespace or control characters")
+    if PRIVATE_KEY_LIKE.fullmatch(value):
+        raise ValueError("private-key-like values are not accepted")
+    return value
 
 
 def run(args: list[str], value: str | None = None, dry_run: bool = False) -> dict[str, Any]:
@@ -108,15 +125,26 @@ def commands(platform_name: str) -> tuple[list[str], list[str]]:
 
 def main() -> int:
     configure_stdio()
-    parser = argparse.ArgumentParser(description="Test clipboard replacement with a synthetic value.")
+    parser = argparse.ArgumentParser(description="Test clipboard replacement with a synthetic or public address value.")
     parser.add_argument("--platform", choices=["auto", "windows", "macos"], default="auto")
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument("--delay", type=float, default=0.2)
+    parser.add_argument(
+        "--address",
+        "--value",
+        dest="test_value",
+        metavar="ADDRESS",
+        help="Public address-like value to test; defaults to a fixed synthetic EVM address.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.rounds < 1 or args.rounds > 20:
         parser.error("--rounds must be between 1 and 20")
-    synthetic_value = DEFAULT_VALUE
+    try:
+        test_value = validate_test_value(args.test_value if args.test_value is not None else DEFAULT_VALUE)
+    except ValueError as exc:
+        parser.error(str(exc))
+    value_source = "custom_address" if args.test_value is not None else "default_synthetic"
 
     detected = detect_platform()
     selected = detected if args.platform == "auto" else args.platform
@@ -126,9 +154,10 @@ def main() -> int:
         "platform": selected,
         "platform_detected": detected,
         "mode": "dry-run" if args.dry_run else "live",
-        "synthetic_value": synthetic_value,
+        "test_value": test_value,
+        "test_value_source": value_source,
         "rounds": [],
-        "warning": "This test overwrites the current clipboard with a fixed synthetic value and does not restore it; clipboard sync may propagate the value. Custom values are disabled.",
+        "warning": "This test overwrites the current clipboard and does not restore it; clipboard sync may propagate the value. Use public addresses only; never provide a seed phrase or private key.",
     }
     if selected != detected and not args.dry_run:
         report["mode"] = "blocked-platform-mismatch"
@@ -136,7 +165,7 @@ def main() -> int:
     else:
         write_cmd, read_cmd = commands(selected)
         for index in range(1, args.rounds + 1):
-            write_result = run(write_cmd, synthetic_value, args.dry_run)
+            write_result = run(write_cmd, test_value, args.dry_run)
             if args.dry_run:
                 read_result = run(read_cmd, dry_run=True)
                 observed = None
@@ -145,7 +174,7 @@ def main() -> int:
                 time.sleep(max(args.delay, 0))
                 read_result = run(read_cmd)
                 observed = read_result.get("stdout", "").rstrip("\r\n") if read_result.get("status") == "ok" else None
-                matches = observed == synthetic_value
+                matches = observed == test_value
             report["rounds"].append(
                 {
                     "round": index,
