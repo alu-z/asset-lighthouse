@@ -16,6 +16,7 @@ import io
 import json
 import os
 import shlex
+import stat as stat_module
 import subprocess
 import sys
 import time
@@ -24,9 +25,10 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA = "asset-lighthouse-evidence/v1"
+SCHEMA = "asset-lighthouse-evidence/v2"
 COMMAND_TIMEOUT = 8
 MAX_ROWS = 200
+MAX_BROWSER_PROFILES = 20
 DEFAULT_WINDOWS_ROOT = Path(r"C:\\Windows")
 
 
@@ -67,12 +69,18 @@ def windows_system_directory() -> Path:
 
 
 def has_symlink_component(path: Path) -> bool:
-    """Return True when any existing component of a path is a symlink."""
+    """Return True when any existing component is a symlink or junction."""
+    is_junction = getattr(os.path, "isjunction", lambda _path: False)
     current = path
     while True:
         try:
-            if current.is_symlink():
+            metadata = current.lstat()
+            reparse_flag = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            file_attributes = getattr(metadata, "st_file_attributes", 0)
+            if stat_module.S_ISLNK(metadata.st_mode) or is_junction(current) or (reparse_flag and file_attributes & reparse_flag):
                 return True
+        except FileNotFoundError:
+            pass
         except OSError:
             return True
         parent = current.parent
@@ -82,16 +90,34 @@ def has_symlink_component(path: Path) -> bool:
 
 
 def write_report(path: Path, encoded: str, force: bool) -> dict[str, str]:
-    """Write a report without following symlinks or overwriting by default."""
+    """Write a private report without following links or overwriting by default."""
     path = path.expanduser()
     if has_symlink_component(path):
         raise ValueError("output_path_contains_symlink")
     if path.exists() and not path.is_file():
         raise ValueError("output_path_is_not_file")
     path.parent.mkdir(parents=True, exist_ok=True)
-    mode = "w" if force else "x"
-    with path.open(mode, encoding="utf-8", newline="\n") as handle:
-        handle.write(encoded + "\n")
+    if has_symlink_component(path):
+        raise ValueError("output_path_contains_symlink")
+    flags = os.O_WRONLY | os.O_CREAT | (0 if force else os.O_EXCL)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat_module.S_ISREG(metadata.st_mode):
+            raise ValueError("output_path_is_not_regular_file")
+        if metadata.st_nlink > 1:
+            raise ValueError("output_file_has_multiple_hard_links")
+        if force:
+            os.ftruncate(descriptor, 0)
+        if os.name != "nt" and hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            descriptor = -1
+            handle.write(encoded + "\n")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     return {"status": "written", "path": str(path), "schema": SCHEMA}
 
 
@@ -203,65 +229,172 @@ def parse_json_stdout(result: dict[str, Any]) -> None:
         result["items"] = [value]
 
 
-def list_extension_dirs(platform_name: str) -> dict[str, Any]:
+def parse_scheduled_tasks(result: dict[str, Any]) -> None:
+    """Parse the stable leading columns from schtasks CSV output."""
+    if result.get("status") != "ok":
+        return
+    rows = parse_csv_rows(result.pop("stdout", ""))
+    result["items"] = [
+        {"task_name": row[0], "next_run_time": row[1], "status": row[2]}
+        for row in rows
+        if len(row) >= 3 and not row[0].startswith("INFO:")
+    ]
+
+
+def parse_launch_agents(result: dict[str, Any]) -> None:
+    """Convert bounded launchctl output into simple records."""
+    if result.get("status") != "ok":
+        return
+    items: list[dict[str, Any]] = []
+    for line in result.pop("stdout", "").splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3 or parts[0].upper() == "PID":
+            continue
+        items.append(
+            {
+                "pid": None if parts[0] == "-" else parts[0],
+                "last_exit_status": parts[1],
+                "label": parts[2],
+            }
+        )
+        if len(items) >= MAX_ROWS:
+            break
+    result["items"] = items
+
+
+def parse_user_services(result: dict[str, Any]) -> None:
+    """Convert bounded systemctl user-service output into simple records."""
+    if result.get("status") != "ok":
+        return
+    items: list[dict[str, str]] = []
+    for line in result.pop("stdout", "").splitlines():
+        parts = line.strip().split(None, 4)
+        if len(parts) < 4:
+            continue
+        items.append(
+            {
+                "unit": parts[0],
+                "load": parts[1],
+                "active": parts[2],
+                "sub": parts[3],
+                "description": parts[4] if len(parts) == 5 else "",
+            }
+        )
+        if len(items) >= MAX_ROWS:
+            break
+    result["items"] = items
+
+
+def extension_roots(platform_name: str) -> dict[str, tuple[str, Path]]:
+    """Return browser profile roots without touching the filesystem."""
     home = Path.home()
     if platform_name == "windows":
         local = Path(os.environ.get("LOCALAPPDATA", home / "AppData/Local"))
         roaming = Path(os.environ.get("APPDATA", home / "AppData/Roaming"))
-        roots = {
-            "chrome": local / "Google/Chrome/User Data/Default/Extensions",
-            "edge": local / "Microsoft/Edge/User Data/Default/Extensions",
-            "firefox": roaming / "Mozilla/Firefox/Profiles",
+        return {
+            "chrome": ("chromium", local / "Google/Chrome/User Data"),
+            "edge": ("chromium", local / "Microsoft/Edge/User Data"),
+            "brave": ("chromium", local / "BraveSoftware/Brave-Browser/User Data"),
+            "firefox": ("firefox", roaming / "Mozilla/Firefox/Profiles"),
         }
-    elif platform_name == "macos":
+    if platform_name == "macos":
         app_support = home / "Library/Application Support"
-        roots = {
-            "chrome": app_support / "Google/Chrome/Default/Extensions",
-            "edge": app_support / "Microsoft Edge/Default/Extensions",
-            "firefox": app_support / "Firefox/Profiles",
+        return {
+            "chrome": ("chromium", app_support / "Google/Chrome"),
+            "edge": ("chromium", app_support / "Microsoft Edge"),
+            "brave": ("chromium", app_support / "BraveSoftware/Brave-Browser"),
+            "firefox": ("firefox", app_support / "Firefox/Profiles"),
         }
-    elif platform_name == "linux":
+    if platform_name == "linux":
         config = home / ".config"
-        roots = {
-            "chrome": config / "google-chrome/Default/Extensions",
-            "edge": config / "microsoft-edge/Default/Extensions",
-            "firefox": home / ".mozilla/firefox/Profiles",
+        return {
+            "chrome": ("chromium", config / "google-chrome"),
+            "edge": ("chromium", config / "microsoft-edge"),
+            "brave": ("chromium", config / "BraveSoftware/Brave-Browser"),
+            "firefox": ("firefox", home / ".mozilla/firefox"),
         }
-    else:
-        roots = {}
+    return {}
+
+
+def bounded_children(
+    root: Path,
+    limit: int,
+    directories_only: bool = True,
+    name_filter: Any = None,
+) -> tuple[list[Path], bool]:
+    """List at most limit children without following symlinks."""
+    children: list[Path] = []
+    for child in root.iterdir():
+        if child.is_symlink():
+            continue
+        if directories_only and not child.is_dir():
+            continue
+        if name_filter is not None and not name_filter(child.name):
+            continue
+        children.append(child)
+        if len(children) > limit:
+            return sorted(children[:limit], key=lambda item: item.name.lower()), True
+    return sorted(children, key=lambda item: item.name.lower()), False
+
+
+def list_extension_dirs(platform_name: str) -> dict[str, Any]:
+    roots = extension_roots(platform_name)
 
     browsers: dict[str, Any] = {}
-    for browser, root in roots.items():
-        item: dict[str, Any] = {"root": str(root), "exists": root.exists(), "extensions": []}
+    for browser, (family, root) in roots.items():
+        item: dict[str, Any] = {"root": str(root), "exists": root.exists(), "profiles": []}
         if has_symlink_component(root):
             item["status"] = "skipped_symlink"
             browsers[browser] = item
             continue
         if root.is_dir():
             try:
-                children = []
-                for child in root.iterdir():
-                    if child.is_symlink() or not child.is_dir():
-                        continue
-                    children.append(child)
-                    if len(children) > MAX_ROWS:
-                        break
-                if len(children) > MAX_ROWS:
-                    item["truncated"] = True
-                    children = children[:MAX_ROWS]
-                children.sort(key=lambda p: p.name.lower())
+                profile_filter = (
+                    (lambda name: name == "Default" or name.startswith("Profile "))
+                    if family == "chromium"
+                    else None
+                )
+                candidates, profiles_truncated = bounded_children(
+                    root,
+                    MAX_BROWSER_PROFILES,
+                    name_filter=profile_filter,
+                )
+                if profiles_truncated:
+                    item["profiles_truncated"] = True
             except OSError as exc:
                 item["error"] = f"list_failed:{type(exc).__name__}"
                 browsers[browser] = item
                 continue
-            for child in children[:MAX_ROWS]:
+            remaining = MAX_ROWS
+            for profile in candidates:
+                extensions_root = profile / "Extensions" if family == "chromium" else profile / "extensions"
+                profile_item: dict[str, Any] = {
+                    "name": profile.name,
+                    "extensions_root": str(extensions_root),
+                    "exists": extensions_root.is_dir(),
+                    "extensions": [],
+                }
+                if remaining <= 0:
+                    item["extensions_truncated"] = True
+                    break
+                if has_symlink_component(extensions_root) or not extensions_root.is_dir():
+                    item["profiles"].append(profile_item)
+                    continue
                 try:
-                    stat = child.lstat()
-                    item["extensions"].append(
-                        {"id_or_profile": child.name, "modified": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()}
-                    )
-                except OSError:
-                    item["extensions"].append({"id_or_profile": child.name, "modified": None})
+                    extensions, truncated = bounded_children(extensions_root, remaining, directories_only=(family == "chromium"))
+                    for extension in extensions:
+                        try:
+                            stat = extension.lstat()
+                            modified = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+                        except OSError:
+                            modified = None
+                        profile_item["extensions"].append({"id_or_file": extension.name, "modified": modified})
+                    remaining -= len(extensions)
+                    if truncated:
+                        item["extensions_truncated"] = True
+                except OSError as exc:
+                    profile_item["error"] = f"list_failed:{type(exc).__name__}"
+                item["profiles"].append(profile_item)
         browsers[browser] = item
     return browsers
 
@@ -277,7 +410,7 @@ def collect_commands(platform_name: str, include_network: bool, dry_run: bool) -
                     "-NoProfile",
                     "-NonInteractive",
                     "-Command",
-                    "Get-Process | Select-Object ProcessName,Id | ConvertTo-Json -Compress",
+                    "Get-Process | Select-Object -First 200 ProcessName,Id | ConvertTo-Json -Compress",
                 ],
                 dry_run,
             )
@@ -294,7 +427,7 @@ def collect_commands(platform_name: str, include_network: bool, dry_run: bool) -
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                "Get-CimInstance Win32_StartupCommand | Select-Object Name,Location | ConvertTo-Json -Compress",
+                "Get-CimInstance Win32_StartupCommand | Select-Object -First 200 Name,Location | ConvertTo-Json -Compress",
             ],
             dry_run,
         )
@@ -305,7 +438,7 @@ def collect_commands(platform_name: str, include_network: bool, dry_run: bool) -
                     "-NoProfile",
                     "-NonInteractive",
                     "-Command",
-                    "Get-ChildItem ($env:APPDATA + '\\Microsoft\\Windows\\Start Menu\\Programs\\Startup') | Select-Object Name,Length,LastWriteTime | ConvertTo-Json -Compress",
+                    "Get-ChildItem ($env:APPDATA + '\\Microsoft\\Windows\\Start Menu\\Programs\\Startup') | Select-Object -First 200 Name,Length,LastWriteTime | ConvertTo-Json -Compress",
                 ],
                 dry_run,
             )
@@ -322,11 +455,22 @@ def collect_commands(platform_name: str, include_network: bool, dry_run: bool) -
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                "Get-ScheduledTask | Select-Object TaskName,TaskPath,State | ConvertTo-Json -Compress",
+                "Get-ScheduledTask | Select-Object -First 200 TaskName,TaskPath,State | ConvertTo-Json -Compress",
             ],
             dry_run,
         )
-        if not dry_run:
+        if not dry_run and tasks.get("status") != "ok":
+            fallback = run_command(
+                [windows_command("schtasks.exe"), "/Query", "/FO", "CSV", "/NH"],
+                dry_run,
+            )
+            if fallback.get("status") == "ok":
+                parse_scheduled_tasks(fallback)
+                fallback["fallback_for"] = "Get-ScheduledTask"
+                tasks = fallback
+            else:
+                tasks["fallback_attempt"] = fallback
+        if not dry_run and tasks.get("status") == "ok" and "items" not in tasks:
             parse_json_stdout(tasks)
         checks["scheduled_tasks"] = tasks
         if include_network:
@@ -344,23 +488,50 @@ def collect_commands(platform_name: str, include_network: bool, dry_run: bool) -
             checks["proxy"] = run_command(
                 [windows_command("netsh.exe"), "winhttp", "show", "proxy"], dry_run
             )
+            user_proxy = run_command(
+                [
+                    windows_command("WindowsPowerShell/v1.0/powershell.exe"),
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Get-ItemProperty -LiteralPath 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' | Select-Object ProxyEnable,ProxyServer,AutoConfigURL | ConvertTo-Json -Compress",
+                ],
+                dry_run,
+            )
+            if not dry_run:
+                parse_json_stdout(user_proxy)
+            checks["proxy_user"] = user_proxy
     elif platform_name == "macos":
         processes = run_command(["/bin/ps", "-axo", "pid=,comm="], dry_run)
         if not dry_run:
             parse_processes(processes, platform_name)
         checks["processes"] = processes
-        checks["launch_agents"] = run_command(["/bin/launchctl", "list"], dry_run)
+        launch_agents = run_command(["/bin/launchctl", "list"], dry_run)
+        if not dry_run:
+            parse_launch_agents(launch_agents)
+        checks["launch_agents"] = launch_agents
         if include_network:
             checks["dns"] = run_command(["/usr/sbin/scutil", "--dns"], dry_run)
-            checks["proxy"] = run_command(["/usr/sbin/networksetup", "-getwebproxy", "Wi-Fi"], dry_run)
+            checks["proxy"] = run_command(["/usr/sbin/scutil", "--proxy"], dry_run)
     elif platform_name == "linux":
         processes = run_command(["/bin/ps", "-axo", "pid=,comm="], dry_run)
         if not dry_run:
             parse_processes(processes, platform_name)
         checks["processes"] = processes
-        checks["user_services"] = run_command(["/usr/bin/systemctl", "--user", "list-units", "--type=service", "--no-pager"], dry_run)
+        user_services = run_command(
+            ["/usr/bin/systemctl", "--user", "list-units", "--type=service", "--no-pager", "--no-legend", "--plain"],
+            dry_run,
+        )
+        if not dry_run:
+            parse_user_services(user_services)
+        checks["user_services"] = user_services
         if include_network:
             checks["dns"] = run_command(["/bin/cat", "/etc/resolv.conf"], dry_run)
+            checks["proxy"] = {
+                "status": "not_available",
+                "reason": "no_safe_distribution-neutral_system_proxy_source",
+                "environment_variables_read": False,
+            }
     else:
         checks["platform"] = {"status": "unsupported", "items": []}
     return checks
@@ -385,7 +556,12 @@ def main() -> int:
         "platform_detected": detected,
         "mode": "dry-run" if args.dry_run else "live",
         "permission_profile": "L1",
-        "read_scope": ["process metadata", "startup/task metadata", "browser extension directory metadata"],
+        "read_scope": [
+            "process metadata",
+            "startup/task metadata",
+            "browser extension directory metadata",
+            *(["DNS and proxy summaries"] if args.profile == "network" else []),
+        ],
         "sensitive_content_read": False,
         "checks": {},
         "warnings": [],
@@ -395,7 +571,13 @@ def main() -> int:
         report["mode"] = "blocked-platform-mismatch"
     else:
         report["checks"] = collect_commands(requested, args.profile == "network", args.dry_run)
-        report["checks"]["browser_extension_dirs"] = {"status": "ok", "items": list_extension_dirs(requested)}
+        if args.dry_run:
+            report["checks"]["browser_extension_dirs"] = {
+                "status": "planned",
+                "browsers": list(extension_roots(requested)),
+            }
+        else:
+            report["checks"]["browser_extension_dirs"] = {"status": "ok", "items": list_extension_dirs(requested)}
 
     encoded = json.dumps(report, ensure_ascii=False, indent=2)
     if args.output:
