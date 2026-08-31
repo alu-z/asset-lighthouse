@@ -69,13 +69,14 @@ Reports are not overwritten by default. Symlink paths and directory paths are re
 
 ### `scripts/clipboard_canary.py`
 
-Tests clipboard replacement on Windows and macOS using a built-in synthetic EVM-style value. Custom addresses are disabled and no transaction is sent.
+Tests clipboard replacement on Windows and macOS using a built-in synthetic EVM-style value or an explicitly supplied public address. No transaction is sent. Seed phrases and private-key-like values are rejected.
 
 ```text
 python scripts/clipboard_canary.py --platform auto --dry-run
+python scripts/clipboard_canary.py --platform auto --address 0x1234567890abcdef1234567890abcdef12345678 --dry-run
 ```
 
-The live test overwrites the current clipboard and does not restore it. Clipboard synchronization may propagate the synthetic value. The Agent must obtain clear confirmation immediately before a live run.
+Use `--address` (or its `--value` alias) to test with a public address from the relevant chain. The live test overwrites the current clipboard and does not restore it. Clipboard synchronization may propagate the test value. The Agent must obtain clear confirmation immediately before a live run. Never provide a seed phrase or private key.
 
 ## Security boundaries
 
