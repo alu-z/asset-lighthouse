@@ -52,8 +52,8 @@ Collects low-risk metadata as an ordinary user on Windows, macOS, or Linux:
 
 - Process metadata
 - Startup items, scheduled tasks, LaunchAgents, or user services
-- Chrome, Edge, and Firefox extension directory metadata
-- Optional DNS and proxy summaries with `--profile network`
+- Chrome, Edge, Brave, and Firefox extension directory metadata
+- Optional DNS and proxy summaries with `--profile network` (Linux reports proxy collection as unavailable instead of reading credential-bearing environment variables)
 
 The collector never reads file contents, passwords, cookies, tokens, Keychain data, seed phrases, private keys, or wallet vaults.
 
@@ -65,18 +65,18 @@ python scripts/collect_local.py --platform auto --output report.json
 python scripts/collect_local.py --platform auto --output report.json --force
 ```
 
-Reports are not overwritten by default. Symlink paths and directory paths are rejected. Use `--force` only when the user explicitly wants to replace an existing report.
+Reports are not overwritten by default. Symlink, junction, hard-linked file, and directory targets are rejected. Use `--force` only when the user explicitly wants to replace an existing report.
 
 ### `scripts/clipboard_canary.py`
 
-Tests clipboard replacement on Windows and macOS using a built-in synthetic EVM-style value or an explicitly supplied public address. No transaction is sent. Seed phrases and private-key-like values are rejected.
+Tests immediate and delayed clipboard replacement on Windows and macOS using a built-in synthetic EVM-style value or an explicitly supplied public address. Common public-address shapes are validated, additional private-key encodings are rejected, and no transaction is sent. Validation is structural only; it does not verify an address checksum or query a chain.
 
 ```text
 python scripts/clipboard_canary.py --platform auto --dry-run
 python scripts/clipboard_canary.py --platform auto --address 0x1234567890abcdef1234567890abcdef12345678 --dry-run
 ```
 
-Use `--address` (or its `--value` alias) to test with a public address from the relevant chain. The live test overwrites the current clipboard and does not restore it. Clipboard synchronization may propagate the test value. The Agent must obtain clear confirmation immediately before a live run. Never provide a seed phrase or private key.
+Use `--address` (or its `--value` alias) to test with a public address from the relevant chain. Auto-detection covers common EVM, Bitcoin, TRON, Solana, TON, and Bech32-style addresses; `--address-format` handles explicit or otherwise ambiguous formats. The live test observes the clipboard for three seconds by default, overwrites the current clipboard, and does not restore it. Clipboard synchronization may propagate the test value. A custom address can appear in command/tool logs, but the JSON report redacts unchanged values by default. A changed public-address-like value is retained once as evidence; other changed content remains redacted. Use `--include-values` only when full unchanged values are genuinely needed. Prefer a valid public address that is not identity-sensitive. The Agent must obtain clear confirmation immediately before a live run. Never provide a seed phrase or private key.
 
 ## Security boundaries
 
@@ -107,7 +107,7 @@ asset-lighthouse/
     └── collect_local.py
 ```
 
-No background service or third-party Python package is required by the skill itself.
+No background service or third-party Python package is required. The scripts require Python 3.10 or newer; modern macOS installations may require the host Agent to provide a Python runtime.
 
 ## Status and limitations
 
