@@ -45,11 +45,11 @@ Prefer ordinary-user-visible processes, login items, LaunchAgent metadata, appli
 
 ## Windows
 
-Prefer ordinary-user-visible processes, startup items, scheduled tasks, browser extensions, proxy/DNS settings, remote sessions, and Defender alerts. Request administrator access only when protected services or security logs are genuinely necessary.
+Prefer ordinary-user-visible processes, startup items, scheduled tasks, browser extensions, proxy/DNS settings, remote sessions, and Defender alerts. If the scheduled-task API is denied, try the ordinary-user `schtasks.exe` fallback and preserve the denial if both checks fail. Request administrator access only when protected services or security logs are genuinely necessary.
 
 ## Linux
 
-Prefer user processes, systemd user services, Cron, shell configuration, browser extensions, proxies, and network connections. System-level logs require separate authorization. Version 1 does not assume a distribution or desktop environment.
+Prefer user processes, systemd user services, Cron, shell configuration, browser extensions, proxies, and network connections. Do not dump proxy environment variables because their URLs may contain credentials; report the proxy source as unavailable when no safe distribution-neutral source exists. System-level logs require separate authorization. Version 1 does not assume a distribution or desktop environment.
 
 ## Mobile
 
