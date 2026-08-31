@@ -31,7 +31,7 @@ Read only the entries relevant to the current symptoms. Each entry includes the 
 
 **Indicators**: Pasted content differs from the copied value; the replacement is a valid-looking address with similar leading/trailing characters; the behavior reproduces across multiple applications.
 
-**Check**: Use the built-in synthetic value, paste it into a text editor and browser address bar, compare character by character, and determine whether all applications or only one webpage is affected.
+**Check**: Use the built-in synthetic value or an explicitly supplied public address, paste it into a text editor and browser address bar, compare character by character, and determine whether all applications or only one webpage is affected. Never use a seed phrase or private key as test input.
 
 **Remediation focus**: Stop transactions and isolate the device; handle assets from a clean device; perform an offline malware scan; if sensitive credentials may have been exposed, create a new wallet.
 
