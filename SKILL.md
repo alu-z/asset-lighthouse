@@ -50,7 +50,7 @@ Start with synthetic data, an asset-free wallet, and a trusted network; do not e
 
 Run only after the user explicitly requests the check and confirms its scope:
 
-- `scripts/clipboard_canary.py`: writes and reads a built-in fixed synthetic value on macOS/Windows to test clipboard replacement; custom addresses are not accepted.
+- `scripts/clipboard_canary.py`: writes and reads a built-in synthetic value, or an explicitly supplied public address, on macOS/Windows to test clipboard replacement. Seed phrases and private-key-like values are rejected.
 - `scripts/collect_local.py`: collects process, startup/task, and browser-extension directory metadata as an ordinary user; `--profile network` additionally collects DNS/proxy summaries.
 
 Both scripts support `--dry-run`. They only write to a user-selected report file or the clipboard test value and do not modify system settings; the host should show the command, output location, and permission scope before running. Report files are not overwritten unless `--force` is explicitly supplied, and symlink paths are rejected.
@@ -58,7 +58,7 @@ Both scripts support `--dry-run`. They only write to a user-selected report file
 Execution rules:
 
 - `collect_local.py` is ordinary-user read-only collection. A host Agent with terminal access may run it after explaining the scope; the user does not need to copy commands. Without terminal access, provide a manual checklist.
-- `clipboard_canary.py` overwrites the current clipboard and does not restore it, so it requires a clear confirmation immediately before execution even though it uses a synthetic value. Clipboard synchronization may propagate the value. The Agent runs it after confirmation; the user does not type commands.
+- `clipboard_canary.py` overwrites the current clipboard and does not restore it, so it requires a clear confirmation immediately before execution. Clipboard synchronization may propagate the value. Use only a public address or the default synthetic value; never provide a seed phrase or private key. The Agent runs it after confirmation; the user does not type commands.
 - The user must confirm any system permission dialog, administrator prompt, or macOS privacy setting in the system UI; the Agent must not bypass or simulate clicks.
 - Record script exit status, permission denial, and reasons for non-execution in the report; never treat a script that did not run as "no anomaly found."
 
@@ -68,9 +68,10 @@ Common calls:
 python scripts/collect_local.py --platform auto
 python scripts/collect_local.py --platform macos --dry-run
 python scripts/clipboard_canary.py --platform auto --dry-run
+python scripts/clipboard_canary.py --platform auto --address 0x1234567890abcdef1234567890abcdef12345678 --dry-run
 ```
 
-Remove `--dry-run` from `clipboard_canary.py` only when the user explicitly requests a live clipboard reproduction; first warn that the current clipboard is overwritten and not restored. The script uses its built-in fixed synthetic value.
+Remove `--dry-run` from `clipboard_canary.py` only when the user explicitly requests a live clipboard reproduction; first warn that the current clipboard is overwritten and not restored. Use the built-in value by default or pass a public address with `--address` (the `--value` alias is also supported). Never pass private keys or seed phrases.
 
 ### 4. Form the assessment
 
